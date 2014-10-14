@@ -1,0 +1,44 @@
+OASISFormat: 0.4
+Name:        merge-ropes
+Version:     0.1.0
+Synopsis:    Mergeable and concurrent ropes
+Authors:     Benjamin Farinier, Thomas Gazagnaire
+License:     ISC
+Plugins:     META (0.4), DevFiles (0.4)
+BuildTools:  ocamlbuild
+
+Library "merge-ropes"
+  Path:             lib
+  Findlibname:      merge-ropes
+  Modules:          Merge_rope
+  ByteOpt:          -bin-annot
+  NativeOpt:        -bin-annot
+  BuildDepends:     irmin, comparelib.syntax, sexplib.syntax
+  XMETARequires:    irmin, comparelib, sexplib
+
+Executable test
+  Path:             lib_test
+  MainIs:           ropes.ml
+  Build$:           flag(tests)
+  CompiledObject:   best
+  Install:          false
+  BuildDepends:     merge-ropes, irmin.unix, alcotest
+
+
+Executable test_merge
+  Path:             lib_test
+  MainIs:           merge_ropes.ml
+  Build$:           flag(tests)
+  CompiledObject:   best
+  Install:          false
+  BuildDepends:     merge-ropes, irmin.unix, alcotest
+
+Test test
+  Run$:             flag(tests)
+  Command:          $test -q
+  WorkingDirectory: lib_test
+
+Test test_merge
+  Run$:             flag(tests)
+  Command:          $test_merge -q
+  WorkingDirectory: lib_test
