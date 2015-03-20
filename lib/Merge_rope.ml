@@ -1,5 +1,6 @@
 (*
  * Copyright (c) 2013-2014 Thomas Gazagnaire <thomas@gazagnaire.org>
+ * Copyright (c) 2015 KC Sivaramakrishnan <sk826@cl.cam.ac.uk>
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -15,10 +16,9 @@
 *)
 
 open Lwt
-open Core_kernel.Std
+open Irmin.Merge.OP
 
-module Log = Log.Make(struct let section = "QUEUE" end)
-
+module Log = Log.Make(struct let section = "ROPE" end)
 
 type stat = {
   ops : int;
@@ -44,11 +44,12 @@ let string_of_stat t =
 
 let string_of_statlist t =
   let tab = "->      " in
-  List.fold ~init:"" ~f:(fun str (i, stat) -> Printf.sprintf "%s%-8i%s%s%s" str i tab (string_of_stat stat) "\n") t
+  List.fold_right (fun (i,stat) str -> Printf.sprintf "%s%-8i%s%s%s" str i tab
+    (string_of_stat stat) "\n") t ""
 
 
 module type S = sig
-  include IrminContents.S
+  include Irmin.Contents.S
   type value
   type cont
 
@@ -71,21 +72,21 @@ module type S = sig
   val reset : unit -> unit
 end
 
-
-
+module type Config = sig
+  val conf: Irmin.config
+  val task: string -> Irmin.task
+end
 
 module Make
     (AO: Irmin.AO_MAKER)
-    (K: IrminKey.S)
+    (K: Irmin.Hash.S)
     (V :
      sig
        type a
-       type t
-       include IrminContents.S with type t := t
+       include Irmin.Contents.S
 
        val empty : t
-
-       val length : t -> int       
+       val length : t -> int
        val set : t -> int -> a -> t
        val get : t -> int -> a
        val insert : t -> int -> t -> t
@@ -94,53 +95,110 @@ module Make
        val concat : t -> t list -> t
        val split : t -> int -> (t * t)
      end)
-  : S with type value = V.a
-       and type cont = V.t = struct
+    (Config: Config)
+= struct
 
-
-  (*
-   * Type of a branch in the internal tree.
-   * 'key' is the Irmin key of the subtree pointed to the branch,
-   * 'min_depth' is the minimal depth of this subtree,
-   * 'max_depth' the maximal one.
-  *)
-  type branch = {
-    key : K.t;
-    min_depth : int;
-    max_depth : int;
-  } with compare, sexp
-
-  (*
-   * Type of a node in the internal tree.
-   * 'ind' is the index of the node, which is equal to length of the left subtree
-   * 'len' is the length of the tree having this node as the root,
-   * 'left' is the branch pointed to the left subtree,
-   * 'right' the branch of the right one.
-  *)
-  type node = {
-    ind : int;
-    len : int;
-    left : branch;
-    right : branch;
-  } with compare, sexp
-
-  (*
-   * Type of index, which is the accessor to the rope internal tree.
-   * 'length' is the length of the whole rope,
-   * 'root' is the root of the internal tree.
-  *)
-  type index = {
-    length : int;
-    root : K.t;
-  } with compare, sexp
-  type elt = Index of index | Node of node | Leaf of V.t with compare, sexp
+  module Path = V.Path
 
   module C = struct
-    module X = IrminIdent.Make(struct
-        type nonrec t = elt
-        with compare, sexp
+
+    (*
+    * Type of a branch in the internal tree.
+    * 'key' is the Irmin key of the subtree pointed to the branch,
+    * 'min_depth' is the minimal depth of this subtree,
+    * 'max_depth' the maximal one.
+    *)
+    type branch = {
+      key : K.t;
+      min_depth : int;
+      max_depth : int;
+    }
+
+    module Branch = Tc.Biject
+      (Tc.Pair (Tc.Pair(K)(Tc.Int))(Tc.Int))
+      (struct
+        type t = branch
+        let to_t ((key, min_depth), max_depth) = {key; min_depth; max_depth}
+        let of_t {key; min_depth; max_depth} = ((key, min_depth), max_depth)
       end)
-    include X
+
+    (*
+    * Type of a node in the internal tree.
+    * 'ind' is the index of the node, which is equal to length of the left subtree
+    * 'len' is the length of the tree having this node as the root,
+    * 'left' is the branch pointed to the left subtree,
+    * 'right' the branch of the right one.
+    *)
+    type node = {
+      ind : int;
+      len : int;
+      left : branch;
+      right : branch;
+    }
+
+    module Node = Tc.Biject
+      (Tc.Pair(Tc.Pair(Tc.Int)(Tc.Int))(Tc.Pair(Branch)(Branch)))
+      (struct
+        type t = node
+        let to_t ((ind, len), (left, right)) =
+          {ind; len; left; right}
+        let of_t {ind; len; left; right} =
+          (ind, len), (left, right)
+      end)
+
+    (*
+    * Type of index, which is the accessor to the rope internal tree.
+    * 'length' is the length of the whole rope,
+    * 'root' is the root of the internal tree.
+    *)
+    type index = {
+      length : int;
+      root : K.t;
+    }
+
+    module Index = Tc.Biject
+      (Tc.Pair(Tc.Int)(K))
+      (struct
+        type t = index
+        let to_t (length, root) = {length; root}
+        let of_t {length; root} = (length, root)
+      end)
+
+    type t = Index of Index.t
+           | Node of Node.t
+           | Leaf of V.t
+           with compare
+
+     let equal a b =
+       Pervasives.compare a b = 0
+
+     let hash = Hashtbl.hash
+
+     let to_json = function
+       | Index i -> `O [ "index", Index.to_json i ]
+       | Node n -> `O [ "node", Node.to_json n ]
+       | Leaf v -> `O [ "leaf", V.to_json v ]
+
+     let of_json = function
+       | `O [ "index", j ] -> Index (Index.of_json j)
+       | `O [ "node", j ] -> Node (Node.of_json j)
+       | `O [ "leaf", j ] -> Leaf (V.of_json j)
+       | j -> Ezjsonm.parse_error j "C.of_json"
+
+    (* FIXME: slow *)
+    let to_string t = Ezjsonm.to_string (to_json t)
+    let of_string s = of_json (Ezjsonm.from_string s)
+    let write t buf =
+      let str = to_string t in
+      let len = String.length str in
+      Cstruct.blit_from_string str 0 buf 0 len;
+      Cstruct.shift buf len
+    let read buf =
+      Mstruct.get_string buf (Mstruct.length buf)
+      |> of_string
+    let size_of t =
+      let str = to_string t in
+      String.length str
   end
 
   module Store = struct
@@ -151,7 +209,7 @@ module Make
      * These tables are indexed by an 'int' which is the size of the rope.
     *)
 
-    module Table = Int.Table
+    module Table = Core_kernel.Std.Int.Table
 
     type action = Set | Get | Insert | Delete | Append | Split | Merge | Other
     type ref_stats = {
@@ -198,9 +256,11 @@ module Make
         | Merge -> t_merge
         | Other -> t_other
       in
-      let list = List.map (Table.to_alist table)
-          (fun (k, s) -> (k, { ops = !(s.r_ops); reads = !(s.r_reads); writes = !(s.r_writes) })) in
-      List.sort ~cmp:(fun (k1, s1) (k2, s2) -> Int.compare k1 k2) list
+      let list = List.map
+          (fun (k, s) -> (k, { ops = !(s.r_ops); reads = !(s.r_reads); writes = !(s.r_writes) }))
+          (Table.to_alist table)
+      in
+      List.sort (fun (k1, s1) (k2, s2) -> Pervasives.compare k1 k2) list
 
     let (switch, incr_read, incr_write) =
       let count_ops = ref (ref 0) in
@@ -231,6 +291,9 @@ module Make
     module S = AO(K)(C)
     include S
 
+    let create () =
+      create Config.conf Config.task
+
     let read t k =
       incr_read ();
       S.read t k
@@ -248,14 +311,12 @@ module Make
 
   end
 
-
-
-  let min_depth t = 1 + (min t.left.min_depth t.right.min_depth)
-  let max_depth t = 1 + (max t.left.max_depth t.right.max_depth)
-  let get_length = function
+  let min_depth t = 1 + C.(min t.left.min_depth t.right.min_depth)
+  let max_depth t = 1 + C.(max t.left.max_depth t.right.max_depth)
+  let get_length = C.(function
     | Index index -> index.length
     | Node node -> node.len
-    | Leaf leaf -> V.length leaf
+    | Leaf leaf -> V.length leaf)
 
 
 
@@ -266,6 +327,7 @@ module Make
   *)
 
   let create_branch store t =
+    let open C in
     match t with
     | Leaf leaf ->
       Store.add store t >>= fun key ->
@@ -276,6 +338,7 @@ module Make
     | Index index -> assert false
 
   let constr_branch t key =
+    let open C in
     match t with
     | Leaf leaf ->
       return { key; min_depth = 1; max_depth = 1 }
@@ -285,6 +348,7 @@ module Make
 
 
   let make_node l_length r_length b_left b_right =
+    let open C in
     assert (l_length >= 0);
     assert (r_length >= 0);
     return {
@@ -324,6 +388,7 @@ module Make
 
 
   let create_index store t =
+    let open C in
     match t with
     | Leaf leaf ->
       Store.add store t >>= fun key ->
@@ -334,6 +399,7 @@ module Make
     | Index index -> return index
 
   let constr_index t key =
+    let open C in
     match t with
     | Leaf leaf ->
       return { length = V.length leaf; root = key }
@@ -344,11 +410,12 @@ module Make
 
   (*
    * Internal tree rotation which is used to keep the tree balanced.
-   * A tree rotation moves one node up in the tree and one node down. 
+   * A tree rotation moves one node up in the tree and one node down.
   *)
   let rec rotate =
 
     let left_to_right store t =
+      let open C in
       match t with
       | Leaf _ -> assert false
       | Index _ -> assert false
@@ -367,6 +434,7 @@ module Make
     in
 
     let right_to_left store t =
+      let open C in
       match t with
       | Leaf _ -> assert false
       | Index _  -> assert false
@@ -385,6 +453,7 @@ module Make
     in
 
     fun store t ->
+      let open C in
       match t with
       | Leaf _ -> assert false
       | Index _ -> assert false
@@ -404,33 +473,33 @@ module Make
   *)
   let create () =
     Store.create () >>= fun store ->
-    create_index store (Leaf V.empty)
+    create_index (store "create_index") (C.Leaf V.empty)
 
 
   (*
    * Create a new rope from a given container.
-   * In order to reduce the number of read/write, the containers stored 
+   * In order to reduce the number of read/write, the containers stored
    * in the leafs have a length equal to depth of the tree.
   *)
   let (make, make_internal) =
 
     let rec make_rec store depth cont =
       let length = V.length cont in
-      if (length < 2 * depth) then return (Leaf cont)
+      if (length < 2 * depth) then return (C.Leaf cont)
       else
         let (c_left, c_right) = V.split cont (length / 2) in
         make_rec store (depth + 1) c_left >>= fun t_left ->
         make_rec store (depth + 1) c_right >>= fun t_right ->
         create_node store t_left t_right >>= fun node ->
-        return (Node node)
+        return (C.Node node)
     in
     (
       (
         fun cont ->
           Store.switch Store.Other (V.length cont);
           Store.create () >>= fun store ->
-          make_rec store 1 cont >>= fun t ->
-          create_index store t
+          make_rec (store "make_rec") 1 cont >>= fun t ->
+          create_index (store "create_index") t
       ),
       (
         fun store ?depth:(d=1) cont ->
@@ -444,7 +513,9 @@ module Make
   *)
   let (flush, flush_free, flush_internal) =
 
-    let rec flush_rec store list = function
+    let rec flush_rec store list v =
+      let open C in
+      match v with
       | Index _ -> assert false
       | Leaf leaf -> return (leaf::list)
       | Node node ->
@@ -453,20 +524,20 @@ module Make
         flush_rec store list t_right >>= fun list ->
         flush_rec store list t_left
     in
-    (
+    C.(
       (
         fun index ->
           Store.create () >>= fun store ->
-          Store.read_exn store index.root >>= fun t ->
-          flush_rec store [] t >>= fun list ->
+          Store.read_exn (store "read_exn") index.root >>= fun t ->
+          flush_rec (store "flush_rec") [] t >>= fun list ->
           return (V.concat V.empty list)
       ),
       (
         fun index ->
           Store.switch Store.Other index.length;
           Store.create () >>= fun store ->
-          Store.read_exn store index.root >>= fun t ->
-          flush_rec store [] t >>= fun list ->
+          Store.read_exn (store "read_exn") index.root >>= fun t ->
+          flush_rec (store "flush_rec") [] t >>= fun list ->
           return (V.concat V.empty list)
       ),
       (
@@ -476,11 +547,8 @@ module Make
       )
     )
 
-  let is_empty index = return (index.length = 0)
-  let length index = return index.length
-
-
-
+  let is_empty index = return (index.C.length = 0)
+  let length index = return index.C.length
 
 
   type choice = Left | Right
@@ -489,7 +557,7 @@ module Make
    * Set the value at the position 'i' in the rope to 'a'
   *)
   let set index i a =
-
+    let open C in
     Store.switch Store.Set index.length;
     Store.create () >>= fun store ->
 
@@ -508,29 +576,29 @@ module Make
       | Node node ->
         match choose node i with
         | Left ->
-          Store.read_exn store node.left.key >>= fun t_left ->
+          Store.read_exn (store "read_exn") node.left.key >>= fun t_left ->
           set_rec i a t_left >>= fun t_left ->
-          create_branch store t_left >>= fun b_left ->
+          create_branch (store "create_branch") t_left >>= fun b_left ->
           make_node node.ind (node.len - node.ind) b_left node.right >>= fun node ->
           return (Node node)
         | Right ->
-          Store.read_exn store node.right.key >>= fun t_right ->
+          Store.read_exn (store "read_exn") node.right.key >>= fun t_right ->
           set_rec (i - node.ind) a t_right >>= fun t_right ->
-          create_branch store t_right >>= fun b_right ->
+          create_branch (store "create_branch") t_right >>= fun b_right ->
           make_node node.ind (node.len - node.ind) node.left b_right >>= fun node ->
           return (Node node)
     in
 
-    Store.read_exn store index.root >>= fun t ->
+    Store.read_exn (store "read_exn") index.root >>= fun t ->
     set_rec i a t >>= fun t ->
-    create_index store t
+    create_index (store "create_index") t
 
 
   (*
    * Return the value at the position 'i' in the rope.
   *)
   let get index i =
-
+    let open C in
     Store.switch Store.Get index.length;
     Store.create () >>= fun store ->
 
@@ -547,14 +615,14 @@ module Make
       | Node node ->
         match choose node i with
         | Left ->
-          Store.read_exn store node.left.key >>= fun t_left ->
+          Store.read_exn (store "read_exn") node.left.key >>= fun t_left ->
           get_rec i t_left
         | Right ->
-          Store.read_exn store node.right.key >>= fun t_right ->
+          Store.read_exn (store "read_exn") node.right.key >>= fun t_right ->
           get_rec (i - node.ind) t_right
     in
 
-    Store.read_exn store index.root >>= fun t ->
+    Store.read_exn (store "read_exn") index.root >>= fun t ->
     get_rec i t
 
 
@@ -565,7 +633,7 @@ module Make
    * Maintain the 'tree depth/leaf length' invariant.
   *)
   let insert index i cont =
-
+    let open C in
     Store.switch Store.Insert (index.length);
     Store.create () >>= fun store ->
 
@@ -585,28 +653,28 @@ module Make
         let l_length = V.length leaf in
         if (l_length < 2 * depth) then return (Leaf leaf)
         else
-          make_internal store ~depth leaf
+          make_internal (store "make_internal") ~depth leaf
       | Node node ->
         match choose node i with
         | Left ->
-          Store.read_exn store node.left.key >>= fun t_left ->
+          Store.read_exn (store "read_exn") node.left.key >>= fun t_left ->
           insert_rec (depth + 1) i t_left >>= fun t_left ->
-          create_branch store t_left >>= fun b_left ->
+          create_branch (store "create_branch") t_left >>= fun b_left ->
           make_node (node.ind + len) (node.len - node.ind) b_left node.right >>= fun node ->
-          rotate store (Node node) >>= fun node ->
+          rotate (store "rotate") (Node node) >>= fun node ->
           return (Node node)
         | Right ->
-          Store.read_exn store node.right.key >>= fun t_right ->
+          Store.read_exn (store "read_exn") node.right.key >>= fun t_right ->
           insert_rec (depth + 1) (i - node.ind) t_right >>= fun t_right ->
-          create_branch store t_right >>= fun b_right ->
+          create_branch (store "create_branch") t_right >>= fun b_right ->
           make_node node.ind (node.len - node.ind + len) node.left b_right >>= fun node ->
-          rotate store (Node node) >>= fun node ->
+          rotate (store "rotate") (Node node) >>= fun node ->
           return (Node node)
     in
 
-    Store.read_exn store index.root >>= fun t ->
+    Store.read_exn (store "read_exn") index.root >>= fun t ->
     insert_rec 1 i t >>= fun t ->
-    create_index store t
+    create_index (store "create_index") t
 
 
 
@@ -616,7 +684,7 @@ module Make
    * Maintain the 'tree depth/leaf length' invariant.
   *)
   let delete index i j =
-
+    let open C in
     Store.switch Store.Delete index.length;
     Store.create () >>= fun store ->
 
@@ -647,32 +715,32 @@ module Make
       | Node node ->
         match (choose node i, choose node (i + j)) with
         | Left, Left ->
-          Store.read_exn store node.left.key >>= fun t_left ->
+          Store.read_exn (store "read_exn") node.left.key >>= fun t_left ->
           delete_rec (depth + 1) i t_left >>= fun t_left ->
-          clean store depth t_left >>= fun t_left ->
-          create_branch store t_left >>= fun b_left ->
+          clean (store "clean") depth t_left >>= fun t_left ->
+          create_branch (store "create_branch") t_left >>= fun b_left ->
           make_node (node.ind - j) (node.len - node.ind) b_left node.right >>= fun node ->
-          rotate store (Node node) >>= fun node ->
+          rotate (store "rotate") (Node node) >>= fun node ->
           return (Node node)
         | Left, Right ->
-          flush_internal store (Node node) >>= fun cont ->
+          flush_internal (store "flush_internal") (Node node) >>= fun cont ->
           let cont = V.delete cont i j in
-          make_internal store ~depth cont >>= fun t ->
+          make_internal (store "make_internal") ~depth cont >>= fun t ->
           return t
         | Right, Left -> assert false
         | Right, Right ->
-          Store.read_exn store node.right.key >>= fun t_right ->
+          Store.read_exn (store "read_exn") node.right.key >>= fun t_right ->
           delete_rec (depth + 1) (i - node.ind) t_right >>= fun t_right ->
-          clean store depth t_right >>= fun t_right ->
-          create_branch store t_right >>= fun b_right ->
+          clean (store "clean") depth t_right >>= fun t_right ->
+          create_branch (store "create_branch") t_right >>= fun b_right ->
           make_node node.ind (node.len - node.ind - j) node.left b_right >>= fun node ->
-          rotate store (Node node) >>= fun node ->
+          rotate (store "rotate") (Node node) >>= fun node ->
           return (Node node)
     in
 
-    Store.read_exn store index.root >>= fun t ->
+    Store.read_exn (store "read_exn") index.root >>= fun t ->
     delete_rec 1 i t >>= fun t ->
-    create_index store t
+    create_index (store "create_index") t
 
 
 
@@ -682,7 +750,7 @@ module Make
    * Else the first one is inserted at the left most position in the second rope.
   *)
   let (append, append_internal) =
-
+    let open C in
     let rec append_left store t = function
       | Index _ -> assert false
       | Leaf leaf ->
@@ -718,17 +786,17 @@ module Make
 
          Store.switch Store.Append (index1.length + index2.length);
          Store.create () >>= fun store ->
-         Store.read_exn store index1.root >>= fun t1 ->
-         Store.read_exn store index2.root >>= fun t2 ->
+         Store.read_exn (store "read_exn") index1.root >>= fun t1 ->
+         Store.read_exn (store "read_exn") index2.root >>= fun t2 ->
          if (index1.length = 0) then return index2
          else if (index2.length = 0) then return index1
          else (
            if (index1.length < index2.length) then
-             append_left store t1 t2
+             append_left (store "append_left") t1 t2
            else
-             append_right store t2 t1
+             append_right (store "append_right") t2 t1
          ) >>= fun node ->
-           create_index store node
+           create_index (store "create_index") node
       ),
       (fun store t1 t2 ->
          let l1 = get_length t1 in
@@ -745,12 +813,11 @@ module Make
 
   let concat t list =
 
-    Store.switch Store.Append (List.fold ~init:0 ~f:(fun i index -> i + index.length) list);
+    Store.switch Store.Append (List.fold_left (fun i index -> i + index.C.length) 0 list);
     flush t >>= fun t ->
     Lwt_list.map_s flush list >>= fun list ->
     let cont = V.concat t list in
     make cont
-
 
 
   (*
@@ -759,7 +826,7 @@ module Make
    * Then these forest are concatenated in order to obtain the two new ropes.
   *)
   let split index i =
-
+    let open C in
     Store.switch Store.Split index.length;
     Store.create () >>= fun store ->
     create () >>= fun empty ->
@@ -775,60 +842,63 @@ module Make
       | Index _ -> assert false
       | Leaf leaf ->
         let (l_left, l_right) = V.split leaf i in
-        append_internal store l_acc (Leaf l_left) >>= fun l_acc ->
-        append_internal store (Leaf l_right) r_acc >>= fun r_acc ->
+        append_internal (store "append_internal") l_acc (Leaf l_left) >>= fun l_acc ->
+        append_internal (store "append_internal") (Leaf l_right) r_acc >>= fun r_acc ->
         return (l_acc, r_acc)
       | Node node ->
-        Store.read_exn store node.left.key >>= fun t_left ->
-        Store.read_exn store node.right.key >>= fun t_right ->
+        Store.read_exn (store "read_exn") node.left.key >>= fun t_left ->
+        Store.read_exn (store "read_exn") node.right.key >>= fun t_right ->
         match choose node i with
         | Left ->
-          append_internal store t_right r_acc >>= fun r_acc ->
+          append_internal (store "append_internal") t_right r_acc >>= fun r_acc ->
           split_rec i l_acc r_acc t_left
         | Right ->
-          append_internal store l_acc t_left >>= fun l_acc ->
+          append_internal (store "append_internal") l_acc t_left >>= fun l_acc ->
           split_rec (i - node.ind) l_acc r_acc t_right
     in
 
-    Store.read_exn store index.root >>= fun t ->
+    Store.read_exn (store "read_exn") index.root >>= fun t ->
     split_rec i (Leaf V.empty) (Leaf V.empty) t >>= fun (l_acc, r_acc) ->
-    create_index store l_acc >>= fun t_left ->
-    create_index store r_acc >>= fun t_right ->
+    create_index (store "create_index") l_acc >>= fun t_left ->
+    create_index (store "create_index") r_acc >>= fun t_right ->
     return (t_left, t_right)
 
 
-  type rope = index with sexp, compare
+  type rope = C.index
+
+  module T = Tc.Biject (C.Index)
+    (struct
+      type t = rope
+      let to_t v = v
+      let of_t v = v
+    end)
+  include T
+
   type value = V.a
   type cont = V.t
 
-  module T = IrminIdent.Make(struct
-      type t = rope with sexp, compare
-    end)
-
-
-
   (*
-   * Merge the given two ropes with the help of their common ancestor.
-   * The algorithm tries to deduce the smallest subtree on which modifications occur,
-   * and then applies the user provided merge function on it.
-   * If the modifications appear in different subtrees, the merge is automatically solved,
-   * without the call of the user merge function.
+   * Merge the given two ropes with the help of their common ancestor. The
+   * algorithm tries to deduce the smallest subtree on which modifications
+   * occur, and then applies the user provided merge function on it. If the
+   * modifications appear in different subtrees, the merge is automatically
+   * solved, without the call of the user merge function.
   *)
-  let merge =
+  let merge: Path.t -> t option Irmin.Merge.t =
+    let open C in
+    let merge_cont = V.merge in
 
-    let module OP = IrminMerge.OP in
-    let merge_cont = IrminMerge.merge V.merge in
-
-    let merge_flush store origin old t1 t2 =
-      if (C.compare t1 t2 = 0) then OP.ok t1
+    let merge_flush store path old t1 t2 =
+      if (C.compare t1 t2 = 0) then ok t1
       else
         flush_internal store old >>= fun old ->
         flush_internal store t1 >>= fun cont1 ->
         flush_internal store t2 >>= fun cont2 ->
-        merge_cont ~origin ~old cont1 cont2 >>= fun res ->
+        let old () = ok (Some (Some old)) in
+        merge_cont path old (Some cont1) (Some cont2) >>= fun res ->
         match res with
-        | `Conflict s -> OP.conflict "%s" s
-        | `Ok cont -> OP.ok (Leaf cont)
+        | `Conflict _ | `Ok None -> conflict "merge"
+        | `Ok (Some cont) -> ok (Leaf cont)
     in
 
     let merge_branch store old1 old2 ((b11, l11), (b12, l12)) ((b21, l21), (b22, l22)) =
@@ -843,7 +913,7 @@ module Make
       else None
     in
 
-    let rec merge_node store origin old n1 n2 =
+    let rec merge_node store path old n1 n2 =
       let ln1 = (n1.left, n1.ind) in
       let rn1 = (n1.right, n1.len - n1.ind) in
       let ln2 = (n2.left, n2.ind) in
@@ -851,66 +921,67 @@ module Make
       let l_opt = merge_branch store old.left old.right (ln1, rn1) (ln2, rn2) in
       let r_opt = merge_branch store old.right old.left (rn1, ln1) (rn2, ln2) in
       match (l_opt, r_opt) with
-      | None, None -> merge_flush store origin (Node old) (Node n1) (Node n2)
+      | None, None -> merge_flush store path (Node old) (Node n1) (Node n2)
       | None, Some (br, lr) -> (
           Store.read_exn store br.key >>= fun t_right ->
           Store.read_exn store old.left.key >>= fun old ->
           Store.read_exn store n1.left.key >>= fun t1 ->
           Store.read_exn store n2.left.key >>= fun t2 ->
-          merge_elt store origin old t1 t2 >>= fun res ->
+          merge_elt store path old t1 t2 >>= fun res ->
           match res with
-          | `Conflict s -> OP.conflict "%s" s
+          | `Conflict _ -> conflict "merge"
           | `Ok t_left ->
             crt_cns_node store t_left (t_right, br.key) >>= fun node ->
-            OP.ok (Node node)
+            ok (Node node)
         )
       | Some (bl, ll), None -> (
           Store.read_exn store bl.key >>= fun t_left ->
           Store.read_exn store old.right.key >>= fun old ->
           Store.read_exn store n1.right.key >>= fun t1 ->
           Store.read_exn store n2.right.key >>= fun t2 ->
-          merge_elt store origin old t1 t2 >>= fun res ->
+          merge_elt store path old t1 t2 >>= fun res ->
           match res with
-          | `Conflict s -> OP.conflict "%s" s
+          | `Conflict _ -> conflict "merge"
           | `Ok t_right ->
             cns_crt_node store (t_left, bl.key) t_right >>= fun node ->
-            OP.ok (Node node)
+            ok (Node node)
         )
       | Some (bl, ll), Some (br, lr) ->
         make_node ll lr bl br >>= fun node ->
-        OP.ok (Node node)
+        ok (Node node)
 
-    and merge_elt store origin old t1 t2 =
+    and merge_elt store path old t1 t2 =
       match (t1, t2) with
       | Index _, _
       | _, Index _ -> assert false
       | Leaf _, _
-      | _, Leaf _ -> merge_flush store origin old t1 t2
+      | _, Leaf _ -> merge_flush store path old t1 t2
       | Node node1, Node node2 ->
         match old with
         | Index _ -> assert false
-        | Leaf _ -> merge_flush store origin old t1 t2
-        | Node old -> merge_node store origin old node1 node2
+        | Leaf _ -> merge_flush store path old t1 t2
+        | Node old -> merge_node store path old node1 node2
     in
 
-    let merge_rope ~origin ~old r1 r2 =
+    let merge_rope path ~old r1 r2 =
+      old () >>= function (* FIXME *)
+      | `Conflict _ | `Ok None -> conflict "merge"
+      | `Ok (Some old) ->
       Store.create () >>= fun store ->
       Store.switch Store.Merge old.length;
-      Store.read_exn store old.root >>= fun old ->
-      Store.read_exn store r1.root >>= fun t1 ->
-      Store.read_exn store r2.root >>= fun t2 ->
-      merge_elt store origin old t1 t2 >>= fun res ->
+      Store.read_exn (store "read_exn") old.root >>= fun old ->
+      Store.read_exn (store "read_exn") r1.root >>= fun t1 ->
+      Store.read_exn (store "read_exn") r2.root >>= fun t2 ->
+      merge_elt (store "merge_elt") path old t1 t2 >>= fun res ->
       match res with
-      | `Conflict s -> OP.conflict "%s" s
+      | `Conflict _ -> conflict "merge"
       | `Ok t ->
-        create_index store t >>= fun index ->
-        OP.ok index
+        create_index (store "create_index") t >>= fun index ->
+        ok index
     in
 
-    IrminMerge.create' (module T) merge_rope
+    fun path -> Irmin.Merge.option (module T) (merge_rope path)
 
-
-  include T
 
   let create = create
   let make = make
@@ -926,8 +997,6 @@ module Make
   let append t1 t2 = append t1 t2
   let concat ~sep list = concat sep list
   let split t ~pos = split t pos
-
-  let merge = merge
 
   let stats () = {
     set = Store.get Store.Set;
