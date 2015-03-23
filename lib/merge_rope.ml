@@ -164,13 +164,14 @@ module Make
         let of_t {length; root} = (length, root)
       end)
 
-    type t = Index of Index.t
-           | Node of Node.t
-           | Leaf of V.t
-           with compare
+    type t =
+      | Index of Index.t
+      | Node of Node.t
+      | Leaf of V.t
+    with compare
 
-     let equal a b =
-       Pervasives.compare a b = 0
+    let equal a b =
+      Pervasives.compare a b = 0
 
      let hash = Hashtbl.hash
 
@@ -209,7 +210,13 @@ module Make
      * These tables are indexed by an 'int' which is the size of the rope.
     *)
 
-    module Table = Core_kernel.Std.Int.Table
+    module Table = Hashtbl.Make(struct
+        type t = int
+        let equal = (=)
+        let hash x = x
+      end )
+
+    let to_alist t = Table.fold (fun k v l -> (k, v) :: l) t []
 
     type action = Set | Get | Insert | Delete | Append | Split | Merge | Other
     type ref_stats = {
@@ -218,14 +225,14 @@ module Make
       r_writes : int ref;
     }
 
-    let t_set = Table.create ()
-    let t_get = Table.create ()
-    let t_insert = Table.create ()
-    let t_delete = Table.create ()
-    let t_concat = Table.create ()
-    let t_split = Table.create ()
-    let t_merge = Table.create ()
-    let t_other = Table.create ()
+    let t_set = Table.create 1024
+    let t_get = Table.create 1024
+    let t_insert = Table.create 1024
+    let t_delete = Table.create 1024
+    let t_concat = Table.create 1024
+    let t_split = Table.create 1024
+    let t_merge = Table.create 1024
+    let t_other = Table.create 1024
 
     let switch action n =
       let table = match action with
@@ -238,12 +245,11 @@ module Make
         | Merge -> t_merge
         | Other -> t_other
       in
-      match Table.find table n with
-      | None ->
+      try Table.find table n
+      with Not_found ->
         let empty = { r_ops = ref 0; r_reads = ref 0; r_writes = ref 0 } in
-        Table.add_exn table n empty;
+        Table.replace table n empty;
         empty
-      | Some stat -> stat
 
     let get action =
       let table = match action with
@@ -258,7 +264,7 @@ module Make
       in
       let list = List.map
           (fun (k, s) -> (k, { ops = !(s.r_ops); reads = !(s.r_reads); writes = !(s.r_writes) }))
-          (Table.to_alist table)
+          (to_alist table)
       in
       List.sort (fun (k1, s1) (k2, s2) -> Pervasives.compare k1 k2) list
 

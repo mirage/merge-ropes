@@ -1,5 +1,4 @@
 open Lwt
-open Core_kernel.Std
 
 module Mem = Irmin_git.AO(Git.Memory)
 module Key = Irmin.Hash.SHA1
@@ -14,28 +13,28 @@ module Str = struct
   let length = String.length
 
   let set t i a =
-    let s = String.copy t in
-    String.set s i a; s
+    let s = Bytes.copy t in
+    Bytes.set s i a; s
   let get = String.get
 
   let insert t i s =
-    assert Int.(0 <= i && i <= String.length t);
+    assert (0 <= i && i <= String.length t);
     let left = String.sub t 0 i in
     let right = String.sub t i (String.length t - i) in
-    String.concat [left; s; right]
+    String.concat "" [left; s; right]
 
   let delete t i j =
-    assert Int.(0 <= i && (i + j) <= String.length t);
+    assert (0 <= i && (i + j) <= String.length t);
     let left = String.sub t 0 i in
     let right = String.sub t (i + j) (String.length t - (i + j)) in
-    String.concat [left; right]
+    String.concat "" [left; right]
 
-  let append s t = String.concat [s; t]
+  let append s t = String.concat "" [s; t]
 
-  let concat sep list = String.concat ~sep list
+  let concat sep list = String.concat sep list
 
   let split t i =
-    assert Int.(0 <= i && i <= String.length t);
+    assert (0 <= i && i <= String.length t);
     let left = String.sub t 0 i in
     let right = String.sub t i (String.length t - i) in
     (left, right)
@@ -46,9 +45,7 @@ module Config = struct
   let task = Irmin_unix.task
 end
 
-
 module Rope = Merge_rope.Make(Mem)(Key)(Str)(Config)
-
 
 module type S = sig
   type state
@@ -67,10 +64,42 @@ module type S = sig
   val verify : state -> string -> bool
 end
 
+let string_of_char_list l =
+  let s = Bytes.create (List.length l) in
+  List.iteri (Bytes.set s) l;
+  s
+
+let array_permute t =
+  let swap i j = let tmp = t.(i) in t.(i) <- t.(j); t.(j) <- tmp in
+  for i = Array.length t downto 2 do
+    swap (i - 1) (Random.int i)
+  done
+
+let list_permute t =
+  let a = Array.of_list t in
+  array_permute a;
+  Array.to_list a
+
+let list_split_n t_orig n =
+  if n <= 0 then
+    ([], t_orig)
+  else
+    let rec loop n t accum =
+      if n = 0 then
+        (List.rev accum, t)
+      else
+        match t with
+        | [] -> (t_orig, []) (* in this case, t_orig = List.rev accum *)
+        | hd :: tl -> loop (n - 1) tl (hd :: accum)
+    in
+    loop n t_orig []
 
 module Oracle : S = struct
 
-  module Map = Int.Map
+  module Map = Map.Make(struct
+      type t = int
+      let compare = Pervasives.compare
+    end)
 
   type clue = {
     rnk : int;
@@ -93,7 +122,7 @@ module Oracle : S = struct
 
   let make_strs n =
     let char_of_int n pos mask =
-      char_of_int (33 + Int.shift_right (Int.bit_and n (Int.shift_left mask pos)) pos)
+      char_of_int (33 + (n land (mask lsl pos)) asr pos)
     in
     let rec make_rec lst = function
       | 0 -> lst
@@ -104,7 +133,7 @@ module Oracle : S = struct
         let c3 = char_of_int bits 12 63 in
         let c4 = char_of_int bits 18 63 in
         let c5 = char_of_int bits 24 63 in
-        let str = String.of_char_list [c1;c2;c3;c4;c5] in
+        let str = string_of_char_list [c1;c2;c3;c4;c5] in
         let lst = str::lst in
         make_rec lst (n - 1)
     in
@@ -143,82 +172,75 @@ module Oracle : S = struct
     fusion_rec [] list
 
   let select list map =
-    let (lst1, lst2) = List.split_n (List.permute list) ((List.length list) * 9 / 10) in
-    let map = List.fold lst1 ~init:map ~f:(fun map c -> Map.add map c.rnk (true, c)) in
-    let str = Map.fold map ~init:"" ~f:(fun ~key ~data:(b, c) str -> if b then Printf.sprintf "%s%s" str c.str else str) in
+    let (lst1, lst2) = list_split_n (list_permute list) ((List.length list) * 9 / 10) in
+    let map = List.fold_left (fun map c -> Map.add c.rnk (true, c) map ) map lst1 in
+    let str = Map.fold (fun key (b, c) str ->
+        if b then Printf.sprintf "%s%s" str c.str else str
+      ) map ""
+    in
     make_state lst2 map, str
 
   let create n =
     let l = fusion (make_strs n) in
-    let m = List.foldi l ~f:(fun i m str -> Map.add m i str) ~init:Map.empty in
+    let _, m = List.fold_left (fun (i, m) str -> i+1, Map.add i str m) (0, Map.empty) l in
     let map = Map.mapi
-        ~f:(let pos = ref 0 in
-            fun ~key ~data ->
-              let clue = make_clue key (!pos) data in
-              pos := (!pos) + (clue.len); (false, clue)
-           )  m in
+        (let pos = ref 0 in
+         fun key data ->
+           let clue = make_clue key (!pos) data in
+           pos := (!pos) + (clue.len); (false, clue)
+        ) m in
     let list = List.mapi
-        ~f:(let pos = ref 0 in
-            fun i str ->
-              let clue = make_clue i (!pos) str in
-              pos := (!pos) + (clue.len); clue
-           ) l in
+        (let pos = ref 0 in
+         fun i str ->
+           let clue = make_clue i (!pos) str in
+           pos := (!pos) + (clue.len); clue
+        ) l in
     select list map
-
 
   let split state clue =
     let f = fun c -> c.pos < clue.pos in
-    let (l1, l2) = List.partition_tf state.list f in
+    let (l1, l2) = List.partition f state.list in
     let state1 = make_state l1 state.map in
     let state2 = make_state l2 state.map in
     (state1, state2)
 
-
-
   let merge state1 state2 =
-    let f ~key = function
-      | `Left _
-      | `Right _ -> assert false
-      | `Both ((b1, c1), (b2, c2)) ->
+    let f key l r = match l, r with
+      | None  , None
+      | Some _, None
+      | None  , Some _ -> assert false
+      | Some (b1, c1), Some (b2, c2) ->
         assert (c1 = c2);
         Some (b1 || b2, c1)
     in
-    let map = Map.merge state1.map state2.map f in
-    let list = List.filter state1.list ~f:(fun c -> List.mem state2.list c) in
+    let map = Map.merge f state1.map state2.map in
+    let list = List.filter (fun c -> List.mem c state2.list) state1.list in
     make_state list map
 
-
-
   let next_clue state =
-    let list = List.permute state.list in
+    let list = list_permute state.list in
     let map = state.map in
     match list with
     | [] -> None
     | a::list ->
-      let map = Map.add map (a.rnk) (true, a) in
+      let map = Map.add (a.rnk) (true, a) map in
       Some (a, {list; map})
-
-
 
   let get_str state clue = clue.str
   let get_len state clue = clue.len
   let get_pos state clue =
-    let map = Map.filter state.map ~f:(fun ~key ~data:(b, c) -> b && key < clue.rnk) in
-    Map.fold map ~init:0 ~f:(fun ~key ~data:(b, c) pos -> pos + c.len)
-
-
+    let map = Map.filter (fun key (b, c) -> b && key < clue.rnk) state.map in
+    Map.fold (fun key (b, c) pos -> pos + c.len) map 0
 
   let verify state string =
-    let str = Map.fold state.map ~init:"" ~f:(fun ~key ~data:(b, c) str -> Printf.sprintf "%s%s" str c.str) in
+    let str =
+      Map.fold (fun key(b, c) str -> Printf.sprintf "%s%s" str c.str) state.map ""
+    in
     print_endline string;
     print_endline str;
     String.(string = str)
 
 end
-
-
-
-
 
 let (set_sclk, get_sclk, upd_sclk, set_rclk, get_rclk, upd_rclk) =
   let s_sum = ref 0. in
@@ -233,7 +255,6 @@ let (set_sclk, get_sclk, upd_sclk, set_rclk, get_rclk, upd_rclk) =
     (fun () -> !r_sum),
     (fun () -> r_sum := (!r_sum) +. (Sys.time ()) -. (!r_tmp))
   )
-
 
 module OP = Irmin.Merge.OP
 
@@ -271,11 +292,10 @@ let merge state string =
   Rope.make string >>= fun rope ->
   merge_rec 0 state rope
 
-
 let main () =
 
-  let len = 1024 in
-  let nbr = 256 in
+  let len = 256 in
+  let nbr = 64 in
   Random.self_init ();
 
   let rec iter c = function

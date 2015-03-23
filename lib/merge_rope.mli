@@ -1,4 +1,3 @@
-
 (*
  * Copyright (c) 2013-2014 Thomas Gazagnaire <thomas@gazagnaire.org>
  * Copyright (c) 2015 KC Sivaramakrishnan <sk826@cl.cam.ac.uk>
@@ -42,36 +41,53 @@ module type S = sig
   type cont
 
   val create : unit -> t Lwt.t
-  (* Create a new empty rope. *)
+  (** Create a new empty rope. *)
+
   val make : cont -> t Lwt.t
-  (* Construct a new rope from the container [cont] *)
+  (** Construct a new rope from the container [cont] *)
+
   val flush : t -> cont Lwt.t
-  (* Return the container represented by the rope [t] *)
+  (** Return the container represented by the rope [t] *)
 
   val is_empty : t -> bool Lwt.t
-  (* Return true if the rope [t] is empty, false otherwise. *)
+  (** Return true if the rope [t] is empty, false otherwise. *)
+
   val length : t -> int Lwt.t
-  (* Return the length of the rope [t]. *)
+  (** Return the length of the rope [t]. *)
 
   val set : t -> pos:int -> value -> t Lwt.t
-  (* Set the value at the position [pos] in the rope [t] to [value]. Complexity: log(n) *)
+  (** Set the value at the position [pos] in the rope [t] to
+      [value]. Complexity: log(n) *)
+
   val get : t -> pos:int -> value Lwt.t
-  (* Get the value containing in the rope [t] at the position [pos]. Complexity: log(n) *)
+  (** Get the value containing in the rope [t] at the position
+      [pos]. Complexity: log(n) *)
+
   val insert : t -> pos:int -> cont -> t Lwt.t
-  (* Insert the container [cont] in the rope [t] at the position [pos]. Complexity: log(n) *)
+  (** Insert the container [cont] in the rope [t] at the position
+      [pos]. Complexity: log(n) *)
+
   val delete : t -> pos:int -> len:int -> t Lwt.t
-  (* Delete [len] elements after the position [pos] in the rope [t]. Complexity: log(n) *)
+  (** Delete [len] elements after the position [pos] in the rope
+      [t]. Complexity: log(n) *)
+
   val append : t -> t -> t Lwt.t
-  (* Append the two given ropes. Complexity: log(n) *)
+  (** Append the two given ropes. Complexity: log(n) *)
+
   val concat : sep:t -> t list -> t Lwt.t
-  (* Concatenate the ropes containing in [list] with the separator [sep]. Complexity: Sum (log n) *)
+  (** Concatenate the ropes containing in [list] with the separator
+      [sep]. Complexity: Sum (log n) *)
+
   val split : t -> pos:int -> (t * t) Lwt.t
-  (* Split the rope [t] at the position [pos] into two ropes. Complexity: log(n) *)
+  (** Split the rope [t] at the position [pos] into two
+      ropes. Complexity: log(n) *)
 
   val stats : unit -> stats
-  (* Return statistics about the rope. *)
+  (** Return statistics about the rope. *)
+
   val reset : unit -> unit
-  (* Reset statistic internal counters. *)
+  (** Reset statistic internal counters. *)
+
 end
 
 module type Config = sig

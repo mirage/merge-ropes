@@ -1,6 +1,6 @@
 OASISFormat: 0.4
 Name:        merge-ropes
-Version:     0.1.0
+Version:     0.2.0
 Synopsis:    Mergeable and concurrent ropes
 Authors:     Benjamin Farinier, Thomas Gazagnaire
 License:     ISC
@@ -13,8 +13,8 @@ Library "merge-ropes"
   Modules:          Merge_rope
   ByteOpt:          -bin-annot
   NativeOpt:        -bin-annot
-  BuildDepends:     irmin, comparelib.syntax, sexplib.syntax
-  XMETARequires:    irmin, comparelib, sexplib
+  BuildDepends:     irmin, comparelib.syntax
+  XMETARequires:    irmin, comparelib
 
 Executable test
   Path:             lib_test

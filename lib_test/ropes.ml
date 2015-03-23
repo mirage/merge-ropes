@@ -1,5 +1,4 @@
 open Lwt
-open Core_kernel.Std
 
 module Mem = Irmin_git.AO(Git.Memory)
 module Key = Irmin.Hash.SHA1
@@ -13,31 +12,32 @@ module Str = struct
   let length = String.length
 
   let set t i a =
-    let s = String.copy t in
-    String.set s i a; s
+    let s = Bytes.copy t in
+    Bytes.set s i a; s
   let get = String.get
 
   let insert t i s =
-    assert Int.(0 <= i && i <= String.length t);
+    assert (0 <= i && i <= String.length t);
     let left = String.sub t 0 i in
     let right = String.sub t i (String.length t - i) in
-    String.concat [left; s; right]
+    String.concat "" [left; s; right]
 
   let delete t i j =
-    assert Int.(0 <= i && (i + j) <= String.length t);
+    assert (0 <= i && (i + j) <= String.length t);
     let left = String.sub t 0 i in
     let right = String.sub t (i + j) (String.length t - (i + j)) in
-    String.concat [left; right]
+    String.concat "" [left; right]
 
-  let append s t = String.concat [s; t]
+  let append s t = String.concat "" [s; t]
 
-  let concat sep list = String.concat ~sep list
+  let concat sep list = String.concat sep list
 
   let split t i =
-    assert Int.(0 <= i && i <= String.length t);
+    assert (0 <= i && i <= String.length t);
     let left = String.sub t 0 i in
     let right = String.sub t i (String.length t - i) in
     (left, right)
+
 end
 
 module Config = struct
@@ -46,7 +46,6 @@ module Config = struct
 end
 
 module Rope = Merge_rope.Make(Mem)(Key)(Str)(Config)
-
 
 module type S = sig
   type state
@@ -64,10 +63,28 @@ module type S = sig
   val verify : state -> string -> bool
 end
 
+let string_of_char_list l =
+  let s = Bytes.create (List.length l) in
+  List.iteri (Bytes.set s) l;
+  s
 
-module Oracle : S = struct
+let array_permute t =
+  let swap i j = let tmp = t.(i) in t.(i) <- t.(j); t.(j) <- tmp in
+  for i = Array.length t downto 2 do
+    swap (i - 1) (Random.int i)
+  done
 
-  module Map = Int.Map
+let list_permute t =
+  let a = Array.of_list t in
+  array_permute a;
+  Array.to_list a
+
+module Oracle: S = struct
+
+  module Map = Map.Make(struct
+      type t = int
+      let compare = Pervasives.compare
+    end)
 
   type action = SetGet | Insert | Delete | Append | Split
 
@@ -94,7 +111,7 @@ module Oracle : S = struct
 
   let make_strs n =
     let char_of_int n pos mask =
-      char_of_int (33 + Int.shift_right (Int.bit_and n (Int.shift_left mask pos)) pos)
+      char_of_int (33 +  (n land (mask lsl pos)) asr pos)
     in
     let rec make_rec lst = function
       | 0 -> lst
@@ -105,7 +122,7 @@ module Oracle : S = struct
         let c3 = char_of_int bits 12 63 in
         let c4 = char_of_int bits 18 63 in
         let c5 = char_of_int bits 24 63 in
-        let str = String.of_char_list [c1;c2;c3;c4;c5] in
+        let str = string_of_char_list [c1;c2;c3;c4;c5] in
         let lst = str::lst in
         make_rec lst (n - 1)
     in
@@ -140,41 +157,43 @@ module Oracle : S = struct
 
   let create n act =
     let l = fusion (make_strs n) in
-    let m = List.foldi l ~f:(fun i m str -> Map.add m i str) ~init:Map.empty in
+    let _, m =
+      List.fold_left (fun (i, m) str -> (i+1), Map.add i str m) (0, Map.empty) l
+    in
     let map_false = Map.mapi
-        ~f:(let pos = ref 0 in
-            fun ~key ~data ->
-              let clue = make_clue key (!pos) data in
-              pos := (!pos) + (clue.len); (false, clue)
-           )  m in
+        (let pos = ref 0 in
+         fun key data ->
+           let clue = make_clue key (!pos) data in
+           pos := (!pos) + (clue.len); (false, clue)
+        )  m in
     let map_true = Map.mapi
-        ~f:(let pos = ref 0 in
-            fun ~key ~data ->
-              let clue = make_clue key (!pos) data in
-              pos := (!pos) + (clue.len); (true, clue)
-           )  m in
+        (let pos = ref 0 in
+         fun key data ->
+           let clue = make_clue key (!pos) data in
+           pos := (!pos) + (clue.len); (true, clue)
+        )  m in
     let list = List.mapi
-        ~f:(let pos = ref 0 in
-            fun i str ->
-              let clue = make_clue i (!pos) str in
-              pos := (!pos) + (clue.len); clue
-           ) l in
+        (let pos = ref 0 in
+         fun i str ->
+           let clue = make_clue i (!pos) str in
+           pos := (!pos) + (clue.len); clue
+        ) l in
     match act with
     | SetGet ->
       let state = make_state SetGet [] [] map_true in
-      state, (String.concat l)
+      state, (String.concat "" l)
     | Insert ->
-      let state = make_state act (List.permute list) [] map_false in
+      let state = make_state act (list_permute list) [] map_false in
       state, ""
     | Delete ->
-      let state = make_state act [] (List.permute list) map_true in
-      state, (String.concat l)
+      let state = make_state act [] (list_permute list) map_true in
+      state, (String.concat "" l)
     | Append ->
       let state = make_state act list [] map_false in
       state, ""
     | Split ->
       let state = make_state act [] list map_true in
-      state, (String.concat l)
+      state, (String.concat "" l)
 
 
   let next_clue state =
@@ -190,7 +209,7 @@ module Oracle : S = struct
         | [] -> None
         | a::lins ->
           let ldel = a::ldel in
-          let map = Map.add map (a.rnk) (true, a) in
+          let map = Map.add (a.rnk) (true, a) map in
           Some (a, {act; lins; ldel; map})
       )
     | Delete
@@ -199,32 +218,35 @@ module Oracle : S = struct
         | [] -> None
         | a::ldel ->
           let lins = a::lins in
-          let map = Map.add map (a.rnk) (false, a) in
+          let map = Map.add (a.rnk) (false, a) map in
           Some (a, {act; lins; ldel; map})
       )
 
   let get_str state clue = clue.str
   let get_len state clue = clue.len
   let get_pos state clue =
-    let map = Map.filter state.map ~f:(fun ~key ~data:(b, c) -> b && key < clue.rnk) in
-    Map.fold map ~init:0 ~f:(fun ~key ~data:(b, c) pos -> pos + c.len)
+    let map = Map.filter (fun key (b, c) -> b && key < clue.rnk) state.map in
+    Map.fold (fun key (b, c) pos -> pos + c.len) map 0
 
   let verify state string =
     match state.act with
     | SetGet ->
-      let str = Map.fold state.map ~init:"" ~f:(fun ~key ~data:(b, c) str -> Printf.sprintf "%s%s" str c.str) in
+      let str = Map.fold (fun key (b, c) str ->
+          Printf.sprintf "%s%s" str c.str
+        ) state.map ""
+      in
       String.(string = str)
     | Insert
     | Append ->
-      let str = Map.fold state.map ~init:"" ~f:(fun ~key ~data:(b, c) str -> Printf.sprintf "%s%s" str c.str) in
+      let str = Map.fold (fun key (b, c) str ->
+          Printf.sprintf "%s%s" str c.str
+        ) state.map ""
+      in
       String.(string = str)
     | Delete
     | Split -> String.(string = "")
+
 end
-
-
-
-
 
 let (set_sclk, get_sclk, upd_sclk, set_rclk, get_rclk, upd_rclk) =
   let s_sum = ref 0. in
@@ -240,10 +262,6 @@ let (set_sclk, get_sclk, upd_sclk, set_rclk, get_rclk, upd_rclk) =
     (fun () -> r_sum := (!r_sum) +. (Sys.time ()) -. (!r_tmp))
   )
 
-
-
-
-
 let setget len =
   let rec setget_rec sget sset rget rset = function
     | 0 -> return (sset, rset)
@@ -258,7 +276,7 @@ let setget len =
   in
   let (state, string) = Oracle.create len Oracle.SetGet in
   let len = String.length string in
-  let sget = String.copy string in
+  let sget = Bytes.copy string in
   let sset = String.make len ' ' in
   Rope.make sget >>= fun rget ->
   Rope.make sset >>= fun rset ->
@@ -266,10 +284,6 @@ let setget len =
   Rope.flush rope >>= fun srope ->
   assert (Oracle.verify state srope && Oracle.verify state string && String.(srope = string));
   return ()
-
-
-
-
 
 let insert_string state string =
   let rec insert_rec state string =
@@ -304,10 +318,6 @@ let insert_rope state string =
   insert_rec state rope >>= fun rope ->
   upd_rclk (); return rope
 
-
-
-
-
 let delete_string state string =
   let rec delete_rec state string =
     match Oracle.next_clue state with
@@ -341,10 +351,6 @@ let delete_rope state string =
   delete_rec state rope >>= fun rope ->
   upd_rclk (); return rope
 
-
-
-
-
 let append_string state string =
   let rec append_rec state string =
     match Oracle.next_clue state with
@@ -373,10 +379,6 @@ let append_rope state string =
   set_rclk ();
   append_rec state rope >>= fun rope ->
   upd_rclk (); return rope
-
-
-
-
 
 let split_string state string =
   let rec split_rec state string =
@@ -411,14 +413,11 @@ let split_rope state string =
   split_rec state rope >>= fun rope ->
   upd_rclk (); return rope
 
-
-
-
 let main () =
   Random.self_init ();
 
-  let len = 256 in
-  let nbr = 256 in
+  let len = (* 256 *) 64 in
+  let nbr = (* 256 *) 32 in
 
   let rec iter_ins len = function
     | 0 -> return ()
