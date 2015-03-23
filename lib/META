@@ -1,6 +1,6 @@
 # OASIS_START
-# DO NOT EDIT (digest: 95523f3411431a0f9183f7cf5d4e0248)
-version = "0.1.0"
+# DO NOT EDIT (digest: bad9f72a93fddd51f73604371b89a702)
+version = "0.2.0"
 description = "Mergeable and concurrent ropes"
 requires = "irmin comparelib"
 archive(byte) = "merge-ropes.cma"
