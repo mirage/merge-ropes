@@ -1,11 +1,12 @@
 open Lwt
 open Core_kernel.Std
 
-module Mem = IrminMemory.AO
-module Key = IrminKey.SHA1
+module Mem = Irmin_git.AO(Git.Memory)
+module Key = Irmin.Hash.SHA1
+module Path = Irmin.Path.String_list
 
 module Str = struct
-  include IrminContents.String
+  include Irmin.Contents.String
 
   type a = char
 
@@ -40,8 +41,13 @@ module Str = struct
     (left, right)
 end
 
+module Config = struct
+  let conf = Irmin_git.config ()
+  let task = Irmin_unix.task
+end
 
-module Rope = Merge_rope.Make(Mem)(Key)(Str)
+
+module Rope = Merge_rope.Make(Mem)(Key)(Str)(Config)
 
 
 module type S = sig
@@ -229,9 +235,9 @@ let (set_sclk, get_sclk, upd_sclk, set_rclk, get_rclk, upd_rclk) =
   )
 
 
-module OP = IrminMerge.OP
+module OP = Irmin.Merge.OP
 
-let merge m state string =
+let merge state string =
   let rec merge_rec d state old =
     (*Rope.flush old >>= fun sold ->
       print_endline (Printf.sprintf "%i <- %s" d sold);*)
@@ -251,10 +257,11 @@ let merge m state string =
             Rope.insert old pos str >>= fun r2 ->
             (*Rope.flush r2 >>= fun str2 ->
               print_endline (Printf.sprintf "%i <- %s <- %s" d str str2);*)
-            m ~old r1 r2 >>= fun res ->
+            let old () = Lwt.return @@ `Ok (Some (Some old)) in
+            Rope.merge [] ~old (Some r1) (Some r2) >>= fun res ->
             match res with
-            | `Conflict s -> OP.conflict "%s" s
-            | `Ok rope ->
+            | `Conflict _ | `Ok None -> OP.conflict "merge"
+            | `Ok (Some rope) ->
               (*Rope.flush rope >>= fun str ->
                 print_endline (Printf.sprintf "%i -> %s" d str);*)
               merge_rec (d + 1) (Oracle.merge state1 state2) rope
@@ -271,22 +278,20 @@ let main () =
   let nbr = 256 in
   Random.self_init ();
 
-  let rec iter m c = function
+  let rec iter c = function
     | 0 -> return ()
     | n ->
       Printf.printf "%-8i->      %-8i%s%!" n c "\r";
       let (state, string) = Oracle.create len in
-      merge m state string >>= fun res ->
+      merge state string >>= fun res ->
       match res with
-      | `Conflict s -> iter m (c + 1) (n - 1)
-      | `Ok _ -> iter m c (n - 1)
+      | `Conflict s -> iter (c + 1) (n - 1)
+      | `Ok _ -> iter c (n - 1)
       (*Rope.flush rope >>= fun str ->
         assert (Oracle.verify state str);*)
   in
 
-  let origin = IrminOrigin.create ""  in
-  let m = (IrminMerge.merge Rope.merge) ~origin in
-  iter m 0 nbr >>= fun () ->
+  iter 0 nbr >>= fun () ->
   let stats = Rope.stats () in
   print_endline "Merge:";
   print_endline (Merge_rope.string_of_statlist stats.Merge_rope.merge);

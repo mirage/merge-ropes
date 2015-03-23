@@ -1,11 +1,11 @@
 open Lwt
 open Core_kernel.Std
 
-module Mem = IrminMemory.AO
-module Key = IrminKey.SHA1
+module Mem = Irmin_git.AO(Git.Memory)
+module Key = Irmin.Hash.SHA1
 
 module Str = struct
-  include IrminContents.String
+  include Irmin.Contents.String
 
   type a = char
 
@@ -40,8 +40,12 @@ module Str = struct
     (left, right)
 end
 
+module Config = struct
+  let conf = Irmin_git.config ()
+  let task = Irmin_unix.task
+end
 
-module Rope = Merge_rope.Make(Mem)(Key)(Str)
+module Rope = Merge_rope.Make(Mem)(Key)(Str)(Config)
 
 
 module type S = sig

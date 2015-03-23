@@ -1,6 +1,7 @@
 
 (*
  * Copyright (c) 2013-2014 Thomas Gazagnaire <thomas@gazagnaire.org>
+ * Copyright (c) 2015 KC Sivaramakrishnan <sk826@cl.cam.ac.uk>
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -14,9 +15,6 @@
  * ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 *)
-
-open Lwt
-open Core_kernel.Std
 
 type stat = {
   ops : int;
@@ -39,7 +37,7 @@ val string_of_statlist: (int * stat) list -> string
 
 module type S = sig
 
-  include IrminContents.S
+  include Irmin.Contents.S
   type value
   type cont
 
@@ -76,17 +74,20 @@ module type S = sig
   (* Reset statistic internal counters. *)
 end
 
+module type Config = sig
+  val conf: Irmin.config
+  val task: string -> Irmin.task
+end
+
 module Make
     (AO: Irmin.AO_MAKER)
-    (K: IrminKey.S)
+    (K: Irmin.Hash.S)
     (V:
      sig
        type a
-       type t
-       include IrminIdent.S with type t := t
+       include Irmin.Contents.S
 
        val empty : t
-
        val length : t -> int
        val set : t -> int -> a -> t
        val get : t -> int -> a
@@ -95,9 +96,8 @@ module Make
        val append : t -> t -> t
        val concat : t -> t list -> t
        val split : t -> int -> (t * t)
-
-       val merge : t IrminMerge.t
      end)
+    (C: Config)
   : S with type value = V.a
        and type cont = V.t
-
+       and module Path = V.Path
