@@ -1,8 +1,8 @@
 # OASIS_START
-# DO NOT EDIT (digest: 620741167c1eca543f62df1f87f5b406)
+# DO NOT EDIT (digest: 95523f3411431a0f9183f7cf5d4e0248)
 version = "0.1.0"
 description = "Mergeable and concurrent ropes"
-requires = "irmin comparelib sexplib"
+requires = "irmin comparelib"
 archive(byte) = "merge-ropes.cma"
 archive(byte, plugin) = "merge-ropes.cma"
 archive(native) = "merge-ropes.cmxa"
