@@ -1,6 +1,19 @@
 open Lwt
 
-module Mem = Irmin_git.AO(Git.Memory)
+module Make_git_AO_maker (G : Git.Store.S) (K : Irmin.Hash.S) (V : Tc.S0) = struct
+  module M = Irmin_unix.Irmin_git.AO(G)(K)(V)
+  include M
+
+  let create config =
+    let level = Irmin.Private.Conf.key ~doc:"The Zlib compression level."
+      "level" Irmin.Private.Conf.(some int) None
+    in
+    let root = Irmin.Private.Conf.get config Irmin.Private.Conf.root in
+    let level = Irmin.Private.Conf.get config level in
+    G.create ?root ?level ()
+end
+
+module Mem = Make_git_AO_maker(Git_unix.Memory)
 module Key = Irmin.Hash.SHA1
 
 module Str = struct
