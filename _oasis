@@ -13,8 +13,8 @@ Library "merge-ropes"
   Modules:          Merge_rope
   ByteOpt:          -bin-annot
   NativeOpt:        -bin-annot
-  BuildDepends:     irmin, comparelib.syntax
-  XMETARequires:    irmin, comparelib
+  BuildDepends:     irmin, ppx_jane
+  XMETARequires:    irmin, ppx_jane
 
 Executable test
   Path:             lib_test
